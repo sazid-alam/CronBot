@@ -151,7 +151,7 @@ class SousChef(commands.Bot):
             start_dt = datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC)
             diff = (start_dt - now).total_seconds() / 60
             
-            if 20 <= diff <= 30 and c['id'] not in self.sent_reminders:
+            if 20 <= diff <= 2030 and c['id'] not in self.sent_reminders:
                 embed = self.create_embed([c], is_reminder=True)
                 view = RegisterView(c['href'])
                 
