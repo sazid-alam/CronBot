@@ -1,32 +1,59 @@
 import os
 import discord
 import aiohttp
+import asyncio
+from flask import Flask
+from threading import Thread
 from discord.ext import tasks, commands
-from dotenv import load_dotenv
 from datetime import datetime, UTC, timedelta
 
-# 1. SETUP
-load_dotenv()
-TOKEN = os.getenv('DISCORD_TOKEN')
-CLIST_USER = os.getenv('CLIST_USERNAME')
-CLIST_KEY = os.getenv('CLIST_API_KEY')
-CHANNEL_ID = int(os.getenv('CHANNEL_ID'))
-RESOURCES = "1,2,93" 
+# --- 1. HEALTH CHECK SERVER ---
+# Railway will use this to confirm your app is "Healthy"
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Sous-Chef is active and the kitchen is open! 👨‍🍳"
+
+def run_server():
+    # Railway provides the PORT environment variable automatically
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_server, daemon=True)
+    t.start()
+
+# --- 2. CONFIGURATION ---
+TOKEN = os.environ.get('DISCORD_TOKEN')
+CLIST_USER = os.environ.get('CLIST_USERNAME')
+CLIST_KEY = os.environ.get('CLIST_API_KEY')
+CHANNEL_ID_STR = os.environ.get('CHANNEL_ID', '0')
+
+try:
+    CHANNEL_ID = int(CHANNEL_ID_STR)
+except ValueError:
+    CHANNEL_ID = 0
+
+RESOURCES = "1,2,93"  # Codeforces, CodeChef, AtCoder
 
 class SousChef(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True
-        intents.guilds = True
+        intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents, help_command=None)
-        
         self.sent_reminders = set()
 
     async def setup_hook(self):
+        print("🔧 Initializing background tasks...")
         self.reminder_patrol.start()
 
+    async def on_ready(self):
+        print(f"---")
+        print(f"✅ SUCCESS: {self.user.name} is online on Railway!")
+        print(f"📡 Monitoring Channel: {CHANNEL_ID}")
+        print(f"---")
+
     async def fetch_contests(self):
-        """Fetches and filters only the specific rounds you want."""
         now = datetime.now(UTC) - timedelta(hours=2)
         formatted_date = now.strftime('%Y-%m-%dT%H:%M:%S')
         
@@ -40,70 +67,52 @@ class SousChef(commands.Bot):
                 async with session.get(url) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        all_contests = data.get('objects', [])
-                        return self.filter_menu(all_contests)
+                        return self.filter_menu(data.get('objects', []))
+                    print(f"⚠️ CLIST API Error: {resp.status}")
                     return []
             except Exception as e:
-                print(f"Connection Error: {e}")
+                print(f"⚠️ Fetch Error: {e}")
                 return []
 
     def filter_menu(self, contests):
-        """The 'Sieve': Only keeps rounds matching your specific list."""
         filtered = []
         for c in contests:
             name = c['event'].lower()
             res_id = c['resource_id']
-
-            # Codeforces (ID: 1)
-            if res_id == 1:
-                cf_keywords = ["div. 2", "div. 3", "div. 4", "div. 1 + 2", "educational"]
-                if any(k in name for k in cf_keywords):
+            if res_id == 1: # CF
+                if any(k in name for k in ["div. 2", "div. 3", "div. 4", "div. 1 + 2", "educational"]):
                     filtered.append(c)
-            
-            # CodeChef (ID: 2)
-            elif res_id == 2:
+            elif res_id == 2: # CC
                 if "starters" in name:
                     filtered.append(c)
-            
-            # AtCoder (ID: 93)
-            elif res_id == 93:
+            elif res_id == 93: # AtCoder
                 if "beginner" in name:
                     filtered.append(c)
-                    
         return filtered
 
     def create_embed(self, contests, is_reminder=False):
         title = "⚠️ UPCOMING CONTEST ALERT" if is_reminder else "🚀 Upcoming CP Contests"
         color = 0xe74c3c if is_reminder else 0x3498db
-        
         embed = discord.Embed(title=title, color=color, timestamp=datetime.now(UTC))
         
         if not contests:
-            embed.description = "The kitchen is empty! No filtered rounds found."
+            embed.description = "No quality rounds found."
             return embed
 
-        # Show top 10 for manual list, 1 for patrol reminder
-        display_limit = 1 if is_reminder else 10
-        
-        for c in contests[:display_limit]:
+        for c in contests[:(1 if is_reminder else 10)]:
             try:
-                start_str = c['start'].replace('Z', '')
-                start_dt = datetime.fromisoformat(start_str).replace(tzinfo=UTC)
+                start_dt = datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC)
                 ts = f"<t:{int(start_dt.timestamp())}:R>"
-                
                 embed.add_field(
                     name=f"⭐ {c['event']}",
-                    value=f"**Platform:** {c['resource']}\n**Starts:** {ts}\n[Register Here]({c['href']})",
+                    value=f"**Platform:** {c['resource']}\n**Starts:** {ts}\n[Link]({c['href']})",
                     inline=False
                 )
             except: continue
-            
-        embed.set_footer(text="👨‍🍳 Sous-Chef | Quality Rounds Only")
         return embed
 
     @tasks.loop(minutes=1)
     async def reminder_patrol(self):
-        """Patrols every minute for contests starting in 20-30 minutes."""
         await self.wait_until_ready()
         channel = self.get_channel(CHANNEL_ID)
         if not channel: return
@@ -112,35 +121,30 @@ class SousChef(commands.Bot):
         now = datetime.now(UTC)
 
         for c in contests:
-            contest_id = c['id']
-            start_str = c['start'].replace('Z', '')
-            start_dt = datetime.fromisoformat(start_str).replace(tzinfo=UTC)
+            start_dt = datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC)
             diff = (start_dt - now).total_seconds() / 60
 
-            # Proactive Reminder Trigger
-            if 20 <= diff <= 30 and contest_id not in self.sent_reminders:
+            if 20 <= diff <= 30 and c['id'] not in self.sent_reminders:
                 embed = self.create_embed([c], is_reminder=True)
-                await channel.send(content="🔔 **Heads up! Your round starts in 30 minutes!**", embed=embed)
-                self.sent_reminders.add(contest_id)
-                print(f"🚨 Reminder sent for: {c['event']}")
+                await channel.send(content="🔔 **Get ready! Contest starts in 30 minutes!**", embed=embed)
+                self.sent_reminders.add(c['id'])
 
-# 2. INITIALIZATION
 bot = SousChef()
-
-@bot.event
-async def on_ready():
-    print(f"👨‍🍳 {bot.user.name} is online and filtering the menu!")
 
 @bot.command(name="contests", aliases=["contest"])
 async def contests_command(ctx):
     async with ctx.typing():
         data = await bot.fetch_contests()
-        embed = bot.create_embed(data)
-        await ctx.send(embed=embed)
+        await ctx.send(embed=bot.create_embed(data))
 
 @bot.command(name="ping")
 async def ping(ctx):
     await ctx.send(f"🏓 Pong! `{round(bot.latency * 1000)}ms`")
 
+# --- 3. EXECUTION ---
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    if not TOKEN:
+        print("❌ ERROR: DISCORD_TOKEN is missing!")
+    else:
+        keep_alive()
+        bot.run(TOKEN)
