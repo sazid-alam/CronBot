@@ -49,10 +49,12 @@ class SousChef(commands.Bot):
         self.sent_reminders = set()
         
         # Platform Branding (Muted colors for a classier look)
+        img_base = "https://raw.githubusercontent.com/sazid-alam/SousChefBot/main"
+        
         self.branding = {
-            1:  {"name": "Codeforces", "color": 0x318ce7, "icon": "🟦", "logo": "https://i.imgur.com/89SclG0.png"},
-            2:  {"name": "CodeChef",   "color": 0x5b2d22, "icon": "🟫", "logo": "https://i.imgur.com/9n07R9S.png"},
-            93: {"name": "AtCoder",    "color": 0x222222, "icon": "⬛", "logo": "https://i.imgur.com/6NOn0A4.png"}
+            1:  {"name": "Codeforces", "color": 0x318ce7, "logo": f"{img_base}/cf.png"},
+            2:  {"name": "CodeChef",   "color": 0x5b2d22, "logo": f"{img_base}/cc.png"},
+            93: {"name": "AtCoder",    "color": 0x222222, "logo": f"{img_base}/ac.png"}
         }
 
     async def setup_hook(self):
