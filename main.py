@@ -13,7 +13,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Sous-Chef is active and the kitchen is open! 👨‍🍳"
+    return "Sous-Chef is active! 👨‍🍳"
 
 def run_server():
     port = int(os.environ.get("PORT", 8080))
@@ -25,7 +25,6 @@ def keep_alive():
 
 # --- 2. INTERACTIVE COMPONENTS ---
 class RegisterView(discord.ui.View):
-    """Adds a clickable button to the message"""
     def __init__(self, url):
         super().__init__()
         self.add_item(discord.ui.Button(label="Register on Platform", url=url, style=discord.ButtonStyle.link))
@@ -49,7 +48,7 @@ class SousChef(commands.Bot):
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.sent_reminders = set()
         
-        # Platform Branding Map (Colors and Logos)
+        # Platform Branding (Muted colors for a classier look)
         self.branding = {
             1:  {"name": "Codeforces", "color": 0x318ce7, "icon": "🟦", "logo": "https://i.imgur.com/89SclG0.png"},
             2:  {"name": "CodeChef",   "color": 0x5b2d22, "icon": "🟫", "logo": "https://i.imgur.com/9n07R9S.png"},
@@ -62,7 +61,7 @@ class SousChef(commands.Bot):
         await self.tree.sync()
 
     async def on_ready(self):
-        print(f"✅ {self.user.name} is online on Railway with Gourmet features!")
+        print(f"✅ {self.user.name} is online and minimal.")
 
     async def fetch_contests(self):
         now = (datetime.now(UTC) - timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%S')
@@ -94,47 +93,49 @@ class SousChef(commands.Bot):
         return filtered
 
     def create_embed(self, contests, is_reminder=False):
-        # 1. Branding & Logic
-        if is_reminder and len(contests) == 1:
-            # Single contest reminder gets full branding
-            c = contests[0]
-            brand = self.branding.get(c['resource_id'], {"color": 0xe74c3c, "logo": None, "icon": "⭐"})
-            title = f"⚠️ CONTEST ALERT: {brand['name']}"
-            color = brand['color']
-        else:
-            # Multi-contest list gets a general theme
-            title = "🚀 Upcoming CP Contests (DU_Rumbling)"
-            color = 0x3498db
-            brand = {"logo": None}
+        # Use a neutral, classy dark grey (Discord's background color) for lists
+        embed_color = 0x2b2d31 
 
-        embed = discord.Embed(title=title, color=color, timestamp=datetime.now(UTC))
-        
-        if brand["logo"]:
-            embed.set_thumbnail(url=brand["logo"])
-        
-        if not contests:
-            embed.description = "The kitchen is empty! No quality rounds found."
+        if is_reminder and len(contests) == 1:
+            # Single reminders get a bit more personality
+            c = contests[0]
+            brand = self.branding.get(c['resource_id'], {"color": 0x2b2d31, "logo": None, "icon": "◈"})
+            embed = discord.Embed(
+                title=f"{brand['icon']} {c['event']}", 
+                description="*A high-quality round is starting soon.*",
+                color=brand['color']
+            )
+            if brand["logo"]:
+                embed.set_thumbnail(url=brand["logo"])
+            
+            ts = int(datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC).timestamp())
+            embed.add_field(name="Schedule", value=f"<t:{ts}:F>\n┕ <t:{ts}:R>")
             return embed
 
-        for c in contests[:(1 if is_reminder else 10)]:
-            try:
-                # 2. BST Time Calculation (UTC + 6)
-                start_dt_utc = datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC)
-                start_dt_bst = start_dt_utc + timedelta(hours=6)
-                
-                bst_str = start_dt_bst.strftime("%I:%M %p, %d %b") # e.g. 08:00 PM, 05 Apr
-                rel_ts = f"<t:{int(start_dt_utc.timestamp())}:R>"
-                
-                brand_info = self.branding.get(c['resource_id'], {"icon": "⭐"})
-                
-                embed.add_field(
-                    name=f"{brand_info['icon']} {c['event']}",
-                    value=f"📅 **BST:** `{bst_str}`\n⏳ **Starts:** {rel_ts}\n[Register Here]({c['href']})",
-                    inline=False
-                )
-            except: continue
+        # --- Minimalist List View ---
+        embed = discord.Embed(title="Upcoming Contests", color=embed_color)
         
-        embed.set_footer(text="Times shown in Bangladesh Standard Time (BST)")
+        if not contests:
+            embed.description = "*The kitchen is empty.*"
+            return embed
+
+        description_lines = []
+        for c in contests[:10]:
+            try:
+                # Get the Unix timestamp (UTC)
+                ts = int(datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC).timestamp())
+                brand_info = self.branding.get(c['resource_id'], {"icon": "•"})
+                
+                # Single-line elegant format
+                # • [Platform Icon] [Title](Link)
+                # ┕ [Full Date/Time] ([Relative Time])
+                line = (f"{brand_info['icon']} **[{c['event']}]({c['href']})**\n"
+                        f"┕ <t:{ts}:f> (<t:{ts}:R>)\n")
+                description_lines.append(line)
+            except: continue
+
+        embed.description = "\n".join(description_lines)
+        embed.set_footer(text="DU_Rumbling • Auto-localized time")
         return embed
 
     @tasks.loop(minutes=1)
@@ -152,11 +153,10 @@ class SousChef(commands.Bot):
             
             if 20 <= diff <= 30 and c['id'] not in self.sent_reminders:
                 embed = self.create_embed([c], is_reminder=True)
-                # Create the interactive button
                 view = RegisterView(c['href'])
                 
                 await channel.send(
-                    content="🔔 **Heads up! A high-quality round starts in 30 minutes!**", 
+                    content="🔔 **30-minute round alert!**", 
                     embed=embed, 
                     view=view
                 )
@@ -165,11 +165,11 @@ class SousChef(commands.Bot):
 bot = SousChef()
 
 # --- 4. SLASH COMMANDS ---
-@bot.tree.command(name="ping", description="Check the kitchen's response time")
+@bot.tree.command(name="ping", description="Check latency")
 async def ping_slash(interaction: discord.Interaction):
-    await interaction.response.send_message(f"🏓 Pong! `{round(bot.latency * 1000)}ms`")
+    await interaction.response.send_message(f"🏓 `{round(bot.latency * 1000)}ms`", ephemeral=True)
 
-@bot.tree.command(name="contests", description="Show upcoming high-quality CP contests in BST")
+@bot.tree.command(name="contests", description="Show upcoming CP contests")
 async def contests_slash(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await bot.fetch_contests()
@@ -178,8 +178,6 @@ async def contests_slash(interaction: discord.Interaction):
 
 # --- 5. EXECUTION ---
 if __name__ == "__main__":
-    if not TOKEN:
-        print("❌ ERROR: DISCORD_TOKEN is missing!")
-    else:
+    if TOKEN:
         keep_alive()
         bot.run(TOKEN)
