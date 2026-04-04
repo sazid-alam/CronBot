@@ -1,4 +1,5 @@
 import os
+import json
 import discord
 import aiohttp
 import asyncio
@@ -46,16 +47,34 @@ class SousChef(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents, help_command=None)
-        self.sent_reminders = set()
         
-        # Platform Branding (Muted colors for a classier look)
+        # Memory Persistence (JSON file)
+        self.memory_file = "sent_reminders.json"
+        self.sent_reminders = self.load_memory()
+        
+        # Official Branding (GitHub Raw Links)
         img_base = "https://raw.githubusercontent.com/sazid-alam/SousChefBot/main"
-        
         self.branding = {
-            1:  {"name": "Codeforces", "color": 0x318ce7, "logo": f"{img_base}/cf.png"},
-            2:  {"name": "CodeChef",   "color": 0x5b2d22, "logo": f"{img_base}/cc.png"},
-            93: {"name": "AtCoder",    "color": 0x222222, "logo": f"{img_base}/ac.png"}
+            1:  {"name": "Codeforces", "color": 0x318ce7, "icon": "🟦", "logo": f"{img_base}/cf.png"},
+            2:  {"name": "CodeChef",   "color": 0x5b2d22, "icon": "🟫", "logo": f"{img_base}/cc.png"},
+            93: {"name": "AtCoder",    "color": 0x222222, "icon": "⬛", "logo": f"{img_base}/ac.png"}
         }
+
+    def load_memory(self):
+        try:
+            if os.path.exists(self.memory_file):
+                with open(self.memory_file, "r") as f:
+                    return set(json.load(f))
+        except Exception as e:
+            print(f"⚠️ Memory Load Error: {e}")
+        return set()
+
+    def save_memory(self):
+        try:
+            with open(self.memory_file, "w") as f:
+                json.dump(list(self.sent_reminders), f)
+        except Exception as e:
+            print(f"⚠️ Memory Save Error: {e}")
 
     async def setup_hook(self):
         self.reminder_patrol.start()
@@ -63,7 +82,7 @@ class SousChef(commands.Bot):
         await self.tree.sync()
 
     async def on_ready(self):
-        print(f"✅ {self.user.name} is online and minimal.")
+        print(f"✅ {self.user.name} is online and operational.")
 
     async def fetch_contests(self):
         now = (datetime.now(UTC) - timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%S')
@@ -95,28 +114,30 @@ class SousChef(commands.Bot):
         return filtered
 
     def create_embed(self, contests, is_reminder=False):
-        # Use a neutral, classy dark grey (Discord's background color) for lists
-        embed_color = 0x2b2d31 
-
         if is_reminder and len(contests) == 1:
-            # Single reminders get a bit more personality
             c = contests[0]
             brand = self.branding.get(c['resource_id'], {"color": 0x2b2d31, "logo": None, "icon": "◈"})
+            
+            # Dynamic Alert Logic
+            ts = int(datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC).timestamp())
+            now_ts = int(datetime.now(UTC).timestamp())
+            minutes_left = (ts - now_ts) // 60
+            
+            alert_type = "30-MINUTE ALERT" if minutes_left < 60 else "UPCOMING ROUND"
+            
             embed = discord.Embed(
-                title=f"{brand['icon']} {c['event']}", 
-                description="*A high-quality round is starting soon.*",
+                title=f"{alert_type}: {c['event']}", 
+                description="*A high-quality round is approaching.*",
                 color=brand['color']
             )
             if brand["logo"]:
                 embed.set_thumbnail(url=brand["logo"])
             
-            ts = int(datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC).timestamp())
             embed.add_field(name="Schedule", value=f"<t:{ts}:F>\n┕ <t:{ts}:R>")
             return embed
 
         # --- Minimalist List View ---
-        embed = discord.Embed(title="Upcoming Contests", color=embed_color)
-        
+        embed = discord.Embed(title="Upcoming Contests", color=0x2b2d31)
         if not contests:
             embed.description = "*The kitchen is empty.*"
             return embed
@@ -124,13 +145,8 @@ class SousChef(commands.Bot):
         description_lines = []
         for c in contests[:10]:
             try:
-                # Get the Unix timestamp (UTC)
                 ts = int(datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC).timestamp())
                 brand_info = self.branding.get(c['resource_id'], {"icon": "•"})
-                
-                # Single-line elegant format
-                # • [Platform Icon] [Title](Link)
-                # ┕ [Full Date/Time] ([Relative Time])
                 line = (f"{brand_info['icon']} **[{c['event']}]({c['href']})**\n"
                         f"┕ <t:{ts}:f> (<t:{ts}:R>)\n")
                 description_lines.append(line)
@@ -153,16 +169,15 @@ class SousChef(commands.Bot):
             start_dt = datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC)
             diff = (start_dt - now).total_seconds() / 60
             
-            if 20 <= diff <= 4500 and c['id'] not in self.sent_reminders:
+            # 20 mins to ~3 days window
+            if 20 <= diff <= 4500 and str(c['id']) not in self.sent_reminders:
                 embed = self.create_embed([c], is_reminder=True)
                 view = RegisterView(c['href'])
                 
-                await channel.send(
-                    content="🔔 **30-minute round alert!**", 
-                    embed=embed, 
-                    view=view
-                )
-                self.sent_reminders.add(c['id'])
+                await channel.send(content="🔔 **New Contest Entry**", embed=embed, view=view)
+                
+                self.sent_reminders.add(str(c['id']))
+                self.save_memory()
 
 bot = SousChef()
 
@@ -177,6 +192,18 @@ async def contests_slash(interaction: discord.Interaction):
     data = await bot.fetch_contests()
     embed = bot.create_embed(data)
     await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="test_reminder", description="Debug: View reminder visuals immediately")
+async def test_reminder(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    data = await bot.fetch_contests()
+    if data:
+        test_contest = data[0]
+        embed = bot.create_embed([test_contest], is_reminder=True)
+        view = RegisterView(test_contest['href'])
+        await interaction.followup.send(content="🧪 **Test Reminder Preview:**", embed=embed, view=view)
+    else:
+        await interaction.followup.send("No contests found to test.")
 
 # --- 5. EXECUTION ---
 if __name__ == "__main__":
