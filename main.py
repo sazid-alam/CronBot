@@ -48,11 +48,10 @@ class SousChef(commands.Bot):
         intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         
-        # Memory Persistence (JSON file)
         self.memory_file = "sent_reminders.json"
         self.sent_reminders = self.load_memory()
         
-        # Official Branding (GitHub Raw Links)
+        # NOTE: Repo must be PUBLIC for these logos to show in Discord
         img_base = "https://raw.githubusercontent.com/sazid-alam/SousChefBot/main"
         self.branding = {
             1:  {"name": "Codeforces", "color": 0x318ce7, "icon": "🟦", "logo": f"{img_base}/cf.png"},
@@ -61,20 +60,16 @@ class SousChef(commands.Bot):
         }
 
     def load_memory(self):
-        try:
-            if os.path.exists(self.memory_file):
+        if os.path.exists(self.memory_file):
+            try:
                 with open(self.memory_file, "r") as f:
                     return set(json.load(f))
-        except Exception as e:
-            print(f"⚠️ Memory Load Error: {e}")
+            except: pass
         return set()
 
     def save_memory(self):
-        try:
-            with open(self.memory_file, "w") as f:
-                json.dump(list(self.sent_reminders), f)
-        except Exception as e:
-            print(f"⚠️ Memory Save Error: {e}")
+        with open(self.memory_file, "w") as f:
+            json.dump(list(self.sent_reminders), f)
 
     async def setup_hook(self):
         self.reminder_patrol.start()
@@ -82,7 +77,7 @@ class SousChef(commands.Bot):
         await self.tree.sync()
 
     async def on_ready(self):
-        print(f"✅ {self.user.name} is online and operational.")
+        print(f"✅ {self.user.name} is online. Window: 20-30m. Memory cleanup enabled.")
 
     async def fetch_contests(self):
         now = (datetime.now(UTC) - timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%S')
@@ -96,7 +91,7 @@ class SousChef(commands.Bot):
                 async with session.get(url) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        return self.filter_menu(data.get('objects', []))
+                        return data.get('objects', [])
                     return []
             except: return []
 
@@ -116,44 +111,34 @@ class SousChef(commands.Bot):
     def create_embed(self, contests, is_reminder=False):
         if is_reminder and len(contests) == 1:
             c = contests[0]
-            brand = self.branding.get(c['resource_id'], {"color": 0x2b2d31, "logo": None, "icon": "◈"})
-            
-            # Dynamic Alert Logic
+            brand = self.branding.get(c['resource_id'], {"color": 0x2b2d31, "logo": None})
             ts = int(datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC).timestamp())
-            now_ts = int(datetime.now(UTC).timestamp())
-            minutes_left = (ts - now_ts) // 60
-            
-            alert_type = "30-MINUTE ALERT" if minutes_left < 60 else "UPCOMING ROUND"
             
             embed = discord.Embed(
-                title=f"{alert_type}: {c['event']}", 
-                description="*A high-quality round is approaching.*",
+                title=f"◈ {c['event']}", 
+                description=f"<t:{ts}:F>\n┕ <t:{ts}:R>",
                 color=brand['color']
             )
             if brand["logo"]:
                 embed.set_thumbnail(url=brand["logo"])
-            
-            embed.add_field(name="Schedule", value=f"<t:{ts}:F>\n┕ <t:{ts}:R>")
             return embed
 
-        # --- Minimalist List View ---
         embed = discord.Embed(title="Upcoming Contests", color=0x2b2d31)
-        if not contests:
-            embed.description = "*The kitchen is empty.*"
+        filtered = self.filter_menu(contests)
+        if not filtered:
+            embed.description = "*No quality rounds scheduled.*"
             return embed
 
-        description_lines = []
-        for c in contests[:10]:
+        lines = []
+        for c in filtered[:10]:
             try:
                 ts = int(datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC).timestamp())
                 brand_info = self.branding.get(c['resource_id'], {"icon": "•"})
-                line = (f"{brand_info['icon']} **[{c['event']}]({c['href']})**\n"
-                        f"┕ <t:{ts}:f> (<t:{ts}:R>)\n")
-                description_lines.append(line)
+                lines.append(f"{brand_info['icon']} **[{c['event']}]({c['href']})**\n┕ <t:{ts}:f> (<t:{ts}:R>)\n")
             except: continue
-
-        embed.description = "\n".join(description_lines)
-        embed.set_footer(text="DU_Rumbling • Auto-localized time")
+        
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="DU_Rumbling • Auto-localized")
         return embed
 
     @tasks.loop(minutes=1)
@@ -162,26 +147,32 @@ class SousChef(commands.Bot):
         channel = self.get_channel(CHANNEL_ID)
         if not channel: return
         
-        contests = await self.fetch_contests()
+        all_objects = await self.fetch_contests()
+        filtered_contests = self.filter_menu(all_objects)
         now = datetime.now(UTC)
         
-        for c in contests:
+        # 1. Cleanup Memory: Remove IDs that are no longer in the "Upcoming" list 
+        # or are less than 20 minutes away (already notified/started)
+        active_ids = {str(c['id']) for c in all_objects}
+        self.sent_reminders = {rid for rid in self.sent_reminders if rid in active_ids}
+        
+        # 2. Check for Reminders (20-30 min window)
+        for c in filtered_contests:
             start_dt = datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC)
             diff = (start_dt - now).total_seconds() / 60
             
-            # 20 mins to ~3 days window
-            if 20 <= diff <= 4500 and str(c['id']) not in self.sent_reminders:
+            if 20 <= diff <= 30 and str(c['id']) not in self.sent_reminders:
                 embed = self.create_embed([c], is_reminder=True)
                 view = RegisterView(c['href'])
                 
-                await channel.send(content="🔔 **New Contest Entry**", embed=embed, view=view)
+                await channel.send(content="🔔 **30-minute alert!**", embed=embed, view=view)
                 
                 self.sent_reminders.add(str(c['id']))
-                self.save_memory()
+        
+        self.save_memory()
 
 bot = SousChef()
 
-# --- 4. SLASH COMMANDS ---
 @bot.tree.command(name="ping", description="Check latency")
 async def ping_slash(interaction: discord.Interaction):
     await interaction.response.send_message(f"🏓 `{round(bot.latency * 1000)}ms`", ephemeral=True)
@@ -193,19 +184,18 @@ async def contests_slash(interaction: discord.Interaction):
     embed = bot.create_embed(data)
     await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="test_reminder", description="Debug: View reminder visuals immediately")
+@bot.tree.command(name="test_reminder", description="Preview reminder visuals")
 async def test_reminder(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     data = await bot.fetch_contests()
-    if data:
-        test_contest = data[0]
-        embed = bot.create_embed([test_contest], is_reminder=True)
-        view = RegisterView(test_contest['href'])
-        await interaction.followup.send(content="🧪 **Test Reminder Preview:**", embed=embed, view=view)
+    filtered = bot.filter_menu(data)
+    if filtered:
+        embed = bot.create_embed([filtered[0]], is_reminder=True)
+        view = RegisterView(filtered[0]['href'])
+        await interaction.followup.send(content="🧪 **Test Preview:**", embed=embed, view=view)
     else:
         await interaction.followup.send("No contests found to test.")
 
-# --- 5. EXECUTION ---
 if __name__ == "__main__":
     if TOKEN:
         keep_alive()
