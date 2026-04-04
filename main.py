@@ -77,7 +77,7 @@ class SousChef(commands.Bot):
         await self.tree.sync()
 
     async def on_ready(self):
-        print(f"✅ {self.user.name} is online. Window: 20-30m. Memory cleanup enabled.")
+        print(f"✅ {self.user.name} is online. @everyone pings active.")
 
     async def fetch_contests(self):
         now = (datetime.now(UTC) - timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%S')
@@ -151,8 +151,7 @@ class SousChef(commands.Bot):
         filtered_contests = self.filter_menu(all_objects)
         now = datetime.now(UTC)
         
-        # 1. Cleanup Memory: Remove IDs that are no longer in the "Upcoming" list 
-        # or are less than 20 minutes away (already notified/started)
+        # 1. Cleanup Memory
         active_ids = {str(c['id']) for c in all_objects}
         self.sent_reminders = {rid for rid in self.sent_reminders if rid in active_ids}
         
@@ -165,7 +164,8 @@ class SousChef(commands.Bot):
                 embed = self.create_embed([c], is_reminder=True)
                 view = RegisterView(c['href'])
                 
-                await channel.send(content="🔔 **30-minute alert!**", embed=embed, view=view)
+                # --- MODIFIED LINE BELOW ---
+                await channel.send(content="@everyone 🔔 **30-minute alert!**", embed=embed, view=view)
                 
                 self.sent_reminders.add(str(c['id']))
         
@@ -192,7 +192,7 @@ async def test_reminder(interaction: discord.Interaction):
     if filtered:
         embed = bot.create_embed([filtered[0]], is_reminder=True)
         view = RegisterView(filtered[0]['href'])
-        await interaction.followup.send(content="🧪 **Test Preview:**", embed=embed, view=view)
+        await interaction.followup.send(content="@everyone 🧪 **Test Preview:**", embed=embed, view=view)
     else:
         await interaction.followup.send("No contests found to test.")
 
