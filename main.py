@@ -85,6 +85,10 @@ class CronBot(commands.Bot):
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        try:
+            cursor.execute("ALTER TABLE sent_contests ADD COLUMN status TEXT")
+        except sqlite3.OperationalError:
+            pass
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS guild_config (
                 guild_id TEXT PRIMARY KEY,
