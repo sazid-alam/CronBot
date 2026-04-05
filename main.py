@@ -126,6 +126,17 @@ class CronBot(commands.Bot):
         logger.info("Syncing slash commands...")
         self.tree.add_command(ConfigGroup(self))
         await self.tree.sync()
+        
+        # Railway Web Service Health Check
+        from aiohttp import web
+        app = web.Application()
+        app.router.add_get('/', lambda r: web.Response(text="CronBot is active!"))
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = int(os.environ.get("PORT", 8080))
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        logger.info(f"Health check server listening on port {port}")
 
     async def on_ready(self):
         logger.info(f"{self.user.name} is online. @everyone pings active.")
