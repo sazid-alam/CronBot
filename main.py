@@ -254,8 +254,8 @@ class CronBot(commands.Bot):
             status = self.sent_reminders.get(c_id)
             c_res = c['resource_id']
             
-            # Tier 1: 30 Min Registration Alert
-            if 25 <= diff <= 35 and status is None:
+            # Tier 1: 30 Min Registration Alert (Fallback window: 8 to 35 mins)
+            if 8 < diff <= 35 and status is None:
                 embed = self.create_embed([c], is_reminder=True)
                 view = RegisterView(c['href'])
                 
@@ -265,20 +265,20 @@ class CronBot(commands.Bot):
                     channel = self.get_channel(int(ch_id))
                     if channel:
                         ping_text = f"<@&{r_id}>" if r_id else "@everyone"
-                        try: await channel.send(content=f"{ping_text} 🔔 **Registration open!** Starts in 30m.", embed=embed, view=view)
+                        try: await channel.send(content=f"{ping_text} 🔔 **Registration open!** Starts in roughly 30m.", embed=embed, view=view)
                         except: pass
                 
                 # Send to DM subscribers
                 for uid in subs_by_resource.get(c_res, []):
                     try:
                         user = self.get_user(int(uid)) or await self.fetch_user(int(uid))
-                        if user: await user.send(content="🔔 **Registration open!** Starts in 30m.", embed=embed, view=view)
+                        if user: await user.send(content="🔔 **Registration open!** Starts in roughly 30m.", embed=embed, view=view)
                     except: pass
                         
                 self.save_memory(c_id, "registration_sent")
                 
-            # Tier 2: 5 Min Get Seated Alert
-            elif 4 <= diff <= 7 and status == "registration_sent":
+            # Tier 2: 5 Min Get Seated Alert (Fallback window: 0 to 8 mins)
+            elif 0 < diff <= 8 and status in (None, "registration_sent"):
                 embed = self.create_embed([c], is_reminder=True)
                 
                 # Send to guilds
@@ -287,14 +287,14 @@ class CronBot(commands.Bot):
                     channel = self.get_channel(int(ch_id))
                     if channel:
                         ping_text = f"<@&{r_id}>" if r_id else "@everyone"
-                        try: await channel.send(content=f"{ping_text} ⚠️ **Starting in 5 minutes!** Get your templates ready.", embed=embed)
+                        try: await channel.send(content=f"{ping_text} ⚠️ **Starting soon!** Get your templates ready.", embed=embed)
                         except: pass
                 
                 # Send to DM subscribers
                 for uid in subs_by_resource.get(c_res, []):
                     try:
                         user = self.get_user(int(uid)) or await self.fetch_user(int(uid))
-                        if user: await user.send(content="⚠️ **Starting in 5 minutes!** Get your templates ready.", embed=embed)
+                        if user: await user.send(content="⚠️ **Starting soon!** Get your templates ready.", embed=embed)
                     except: pass
                         
                 self.save_memory(c_id, "starting_soon_sent")
