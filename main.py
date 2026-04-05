@@ -14,7 +14,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "Sous-Chef is active! 👨‍🍳"
+    return "Cron is active! ⏰"
 
 def run_server():
     port = int(os.environ.get("PORT", 8080))
@@ -43,7 +43,7 @@ except ValueError:
 
 RESOURCES = "1,2,93" 
 
-class SousChef(commands.Bot):
+class CronBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents, help_command=None)
@@ -52,7 +52,7 @@ class SousChef(commands.Bot):
         self.sent_reminders = self.load_memory()
         
         # NOTE: Repo must be PUBLIC for these logos to show in Discord
-        img_base = "https://raw.githubusercontent.com/sazid-alam/SousChefBot/main"
+        img_base = "https://raw.githubusercontent.com/sazid-alam/CronBot/main"
         self.branding = {
             1:  {"name": "Codeforces", "color": 0x318ce7, "icon": "🟦", "logo": f"{img_base}/cf.png"},
             2:  {"name": "CodeChef",   "color": 0x5b2d22, "icon": "🟫", "logo": f"{img_base}/cc.png"},
@@ -171,7 +171,7 @@ class SousChef(commands.Bot):
         
         self.save_memory()
 
-bot = SousChef()
+bot = CronBot()
 
 @bot.tree.command(name="ping", description="Check latency")
 async def ping_slash(interaction: discord.Interaction):
