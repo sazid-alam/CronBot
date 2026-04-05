@@ -1,28 +1,19 @@
 import os
-import json
+import sqlite3
+import logging
 import discord
 import aiohttp
 import asyncio
-from flask import Flask
-from threading import Thread
 from discord import app_commands
 from discord.ext import tasks, commands
 from datetime import datetime, UTC, timedelta
 
-# --- 1. HEALTH CHECK SERVER ---
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Cron is active! ⏰"
-
-def run_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run_server, daemon=True)
-    t.start()
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("CronBot")
 
 # --- 2. INTERACTIVE COMPONENTS ---
 class RegisterView(discord.ui.View):
@@ -43,12 +34,38 @@ except ValueError:
 
 RESOURCES = "1,2,93" 
 
+class ConfigGroup(app_commands.Group):
+    def __init__(self, bot):
+        super().__init__(name="config", description="Admin configuration commands")
+        self.bot = bot
+
+    @app_commands.command(name="set_channel", description="Set the channel for contest announcements")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        conn = sqlite3.connect(self.bot.db_file)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO guild_config (guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id", (str(interaction.guild_id), str(channel.id)))
+        conn.commit()
+        conn.close()
+        await interaction.response.send_message(f"✅ Alert channel set to {channel.mention}", ephemeral=True)
+
+    @app_commands.command(name="set_ping_role", description="Set the role to ping for contests")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def set_ping_role(self, interaction: discord.Interaction, role: discord.Role):
+        conn = sqlite3.connect(self.bot.db_file)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO guild_config (guild_id, role_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET role_id=excluded.role_id", (str(interaction.guild_id), str(role.id)))
+        conn.commit()
+        conn.close()
+        await interaction.response.send_message(f"✅ Ping role set to {role.name}", ephemeral=True)
+
 class CronBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         
-        self.memory_file = "sent_reminders.json"
+        self.db_file = "cronbot.db"
+        self.init_db()
         self.sent_reminders = self.load_memory()
         
         # NOTE: Repo must be PUBLIC for these logos to show in Discord
@@ -59,25 +76,59 @@ class CronBot(commands.Bot):
             93: {"name": "AtCoder",    "color": 0x222222, "icon": "⬛", "logo": f"{img_base}/ac.png"}
         }
 
-    def load_memory(self):
-        if os.path.exists(self.memory_file):
-            try:
-                with open(self.memory_file, "r") as f:
-                    return set(json.load(f))
-            except: pass
-        return set()
+    def init_db(self):
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sent_contests (
+                contest_id TEXT PRIMARY KEY,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS guild_config (
+                guild_id TEXT PRIMARY KEY,
+                channel_id TEXT,
+                role_id TEXT
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_subscriptions (
+                user_id TEXT,
+                resource_id INTEGER,
+                PRIMARY KEY (user_id, resource_id)
+            )
+        ''')
+        conn.commit()
+        conn.close()
 
-    def save_memory(self):
-        with open(self.memory_file, "w") as f:
-            json.dump(list(self.sent_reminders), f)
+    def load_memory(self):
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute('SELECT contest_id, status FROM sent_contests')
+        rows = cursor.fetchall()
+        conn.close()
+        return {row[0]: row[1] for row in rows}
+
+    def save_memory(self, contest_id, status="registration_sent"):
+        try:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            cursor.execute('INSERT OR REPLACE INTO sent_contests (contest_id, status) VALUES (?, ?)', (str(contest_id), status))
+            conn.commit()
+            conn.close()
+            self.sent_reminders[str(contest_id)] = status
+        except Exception as e:
+            logger.error(f"DB Save Error: {e}")
 
     async def setup_hook(self):
         self.reminder_patrol.start()
-        print("🔄 Syncing slash commands...")
+        logger.info("Syncing slash commands...")
+        self.tree.add_command(ConfigGroup(self))
         await self.tree.sync()
 
     async def on_ready(self):
-        print(f"✅ {self.user.name} is online. @everyone pings active.")
+        logger.info(f"{self.user.name} is online. @everyone pings active.")
 
     async def fetch_contests(self):
         now = (datetime.now(UTC) - timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%S')
@@ -92,8 +143,11 @@ class CronBot(commands.Bot):
                     if resp.status == 200:
                         data = await resp.json()
                         return data.get('objects', [])
-                    return []
-            except: return []
+                    logger.error(f"CLIST API Error: {resp.status}")
+                    return None
+            except Exception as e:
+                logger.error(f"Fetch Error: {e}")
+                return None
 
     def filter_menu(self, contests):
         filtered = []
@@ -144,32 +198,91 @@ class CronBot(commands.Bot):
     @tasks.loop(minutes=1)
     async def reminder_patrol(self):
         await self.wait_until_ready()
-        channel = self.get_channel(CHANNEL_ID)
-        if not channel: return
         
         all_objects = await self.fetch_contests()
+        if all_objects is None:
+            logger.warning("Skipping patrol due to API error. Retaining current memory state.")
+            return
+
         filtered_contests = self.filter_menu(all_objects)
         now = datetime.now(UTC)
         
+        # Pull Configs & Subs
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute("SELECT guild_id, channel_id, role_id FROM guild_config")
+        guild_configs = cursor.fetchall()
+        cursor.execute("SELECT user_id, resource_id FROM user_subscriptions")
+        subscriptions = cursor.fetchall()
+        conn.close()
+        
+        subs_by_resource = {}
+        for uid, rid in subscriptions:
+            subs_by_resource.setdefault(rid, []).append(uid)
+        
         # 1. Cleanup Memory
         active_ids = {str(c['id']) for c in all_objects}
-        self.sent_reminders = {rid for rid in self.sent_reminders if rid in active_ids}
+        to_remove = [rid for rid in self.sent_reminders.keys() if rid not in active_ids]
+        if to_remove:
+            conn = sqlite3.connect(self.db_file)
+            cursor = conn.cursor()
+            cursor.executemany('DELETE FROM sent_contests WHERE contest_id = ?', [(r,) for r in to_remove])
+            conn.commit()
+            conn.close()
+            self.sent_reminders = {rid: status for rid, status in self.sent_reminders.items() if rid in active_ids}
         
-        # 2. Check for Reminders (20-30 min window)
+        # 2. Check for Reminders (Multi-Stage)
         for c in filtered_contests:
             start_dt = datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC)
             diff = (start_dt - now).total_seconds() / 60
+            c_id = str(c['id'])
+            status = self.sent_reminders.get(c_id)
+            c_res = c['resource_id']
             
-            if 20 <= diff <= 30 and str(c['id']) not in self.sent_reminders:
+            # Tier 1: 30 Min Registration Alert
+            if 25 <= diff <= 35 and status is None:
                 embed = self.create_embed([c], is_reminder=True)
                 view = RegisterView(c['href'])
                 
-                # --- MODIFIED LINE BELOW ---
-                await channel.send(content="@everyone 🔔 **30-minute alert!**", embed=embed, view=view)
+                # Send to guilds
+                for g_id, ch_id, r_id in guild_configs:
+                    if not ch_id: continue
+                    channel = self.get_channel(int(ch_id))
+                    if channel:
+                        ping_text = f"<@&{r_id}>" if r_id else "@everyone"
+                        try: await channel.send(content=f"{ping_text} 🔔 **Registration open!** Starts in 30m.", embed=embed, view=view)
+                        except: pass
                 
-                self.sent_reminders.add(str(c['id']))
-        
-        self.save_memory()
+                # Send to DM subscribers
+                for uid in subs_by_resource.get(c_res, []):
+                    try:
+                        user = self.get_user(int(uid)) or await self.fetch_user(int(uid))
+                        if user: await user.send(content="🔔 **Registration open!** Starts in 30m.", embed=embed, view=view)
+                    except: pass
+                        
+                self.save_memory(c_id, "registration_sent")
+                
+            # Tier 2: 5 Min Get Seated Alert
+            elif 4 <= diff <= 7 and status == "registration_sent":
+                embed = self.create_embed([c], is_reminder=True)
+                
+                # Send to guilds
+                for g_id, ch_id, r_id in guild_configs:
+                    if not ch_id: continue
+                    channel = self.get_channel(int(ch_id))
+                    if channel:
+                        ping_text = f"<@&{r_id}>" if r_id else "@everyone"
+                        try: await channel.send(content=f"{ping_text} ⚠️ **Starting in 5 minutes!** Get your templates ready.", embed=embed)
+                        except: pass
+                
+                # Send to DM subscribers
+                for uid in subs_by_resource.get(c_res, []):
+                    try:
+                        user = self.get_user(int(uid)) or await self.fetch_user(int(uid))
+                        if user: await user.send(content="⚠️ **Starting in 5 minutes!** Get your templates ready.", embed=embed)
+                    except: pass
+                        
+                self.save_memory(c_id, "starting_soon_sent")
 
 bot = CronBot()
 
@@ -196,7 +309,34 @@ async def test_reminder(interaction: discord.Interaction):
     else:
         await interaction.followup.send("No contests found to test.")
 
+@bot.tree.command(name="subscribe", description="Subscribe to receive DMs for contests")
+@app_commands.choices(platform=[
+    app_commands.Choice(name="Codeforces", value=1),
+    app_commands.Choice(name="CodeChef", value=2),
+    app_commands.Choice(name="AtCoder", value=93)
+])
+async def subscribe_slash(interaction: discord.Interaction, platform: app_commands.Choice[int]):
+    conn = sqlite3.connect(bot.db_file)
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR IGNORE INTO user_subscriptions (user_id, resource_id) VALUES (?, ?)', (str(interaction.user.id), platform.value))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Subscribed to {platform.name} DMs!", ephemeral=True)
+
+@bot.tree.command(name="unsubscribe", description="Unsubscribe from contest DMs")
+@app_commands.choices(platform=[
+    app_commands.Choice(name="Codeforces", value=1),
+    app_commands.Choice(name="CodeChef", value=2),
+    app_commands.Choice(name="AtCoder", value=93)
+])
+async def unsubscribe_slash(interaction: discord.Interaction, platform: app_commands.Choice[int]):
+    conn = sqlite3.connect(bot.db_file)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM user_subscriptions WHERE user_id=? AND resource_id=?', (str(interaction.user.id), platform.value))
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(f"✅ Unsubscribed from {platform.name} DMs.", ephemeral=True)
+
 if __name__ == "__main__":
     if TOKEN:
-        keep_alive()
         bot.run(TOKEN)
