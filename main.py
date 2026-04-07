@@ -64,7 +64,7 @@ class CronBot(commands.Bot):
         intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         
-        self.db_file = "cronbot.db"
+        self.db_file = os.environ.get("DB_PATH", "cronbot.db")
         self.init_db()
         self.sent_reminders = self.load_memory()
         
