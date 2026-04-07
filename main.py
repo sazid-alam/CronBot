@@ -59,6 +59,16 @@ class ConfigGroup(app_commands.Group):
         conn.close()
         await interaction.response.send_message(f"✅ Ping role set to {role.name}", ephemeral=True)
 
+    @app_commands.command(name="inspect", description="Debug: Verify if SQLite DB data persisted")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def inspect(self, interaction: discord.Interaction):
+        conn = sqlite3.connect(self.bot.db_file)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM guild_config")
+        data = cursor.fetchall()
+        conn.close()
+        await interaction.response.send_message(f"📁 **DB State (guild_config):**\n```json\n{data}\n```", ephemeral=True)
+
 class CronBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
