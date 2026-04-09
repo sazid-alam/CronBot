@@ -1,5 +1,6 @@
 import os
-import sqlite3
+import sys
+import aiosqlite
 import logging
 import discord
 import aiohttp
@@ -15,6 +16,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("CronBot")
 
+# --- 1. SETUP & VALIDATION ---
+TOKEN = os.environ.get('DISCORD_TOKEN')
+CLIST_USER = os.environ.get('CLIST_USERNAME')
+CLIST_KEY = os.environ.get('CLIST_API_KEY')
+if not TOKEN or not CLIST_USER or not CLIST_KEY:
+    logger.error("Missing critical environment variables: DISCORD_TOKEN, CLIST_USERNAME, or CLIST_API_KEY.")
+    sys.exit(1)
+
+CHANNEL_ID_STR = os.environ.get('CHANNEL_ID', '0')
+try:
+    CHANNEL_ID = int(CHANNEL_ID_STR)
+except ValueError:
+    CHANNEL_ID = 0
+
+RESOURCES = "1,2,93"
+
 # --- 2. INTERACTIVE COMPONENTS ---
 class RegisterView(discord.ui.View):
     def __init__(self, url):
@@ -26,19 +43,19 @@ class RoleToggleView(discord.ui.View):
         super().__init__(timeout=None)
         
     async def fetch_ping_role(self, interaction: discord.Interaction):
-        conn = sqlite3.connect(interaction.client.db_file)
-        cursor = conn.cursor()
-        cursor.execute("SELECT role_id FROM guild_config WHERE guild_id = ?", (str(interaction.guild_id),))
-        row = cursor.fetchone()
-        conn.close()
+        async with aiosqlite.connect(interaction.client.db_file) as db:
+            async with db.execute("SELECT role_id FROM guild_config WHERE guild_id = ?", (str(interaction.guild_id),)) as cursor:
+                row = await cursor.fetchone()
         
         if not row or not row[0]:
-            await interaction.response.send_message("The server admin hasn't configured a ping role yet.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("The server admin hasn't configured a ping role yet.", ephemeral=True)
             return None
             
         role = interaction.guild.get_role(int(row[0]))
         if not role:
-            await interaction.response.send_message("The configured ping role no longer exists.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("The configured ping role no longer exists.", ephemeral=True)
             return None
         return role
 
@@ -55,6 +72,8 @@ class RoleToggleView(discord.ui.View):
                 await interaction.response.send_message(f"✅ Given the **{role.name}** role! You will now be mentioned for contests.", ephemeral=True)
             except discord.Forbidden:
                 await interaction.response.send_message("I don't have permission to manage this role. Make sure the bot's role is higher than the ping role in settings.", ephemeral=True)
+            except Exception as e:
+                logger.warning(f"Error giving role: {e}")
 
     @discord.ui.button(label="Remove Role", style=discord.ButtonStyle.danger, custom_id="persistent_role_remove", emoji="❌")
     async def remove_role(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -69,6 +88,8 @@ class RoleToggleView(discord.ui.View):
                 await interaction.response.send_message(f"❌ Removed the **{role.name}** role.", ephemeral=True)
             except discord.Forbidden:
                 await interaction.response.send_message("I don't have permission to manage this role. Make sure the bot's role is higher than the ping role in settings.", ephemeral=True)
+            except Exception as e:
+                logger.warning(f"Error removing role: {e}")
 
     @discord.ui.button(label="Check Status", style=discord.ButtonStyle.secondary, custom_id="persistent_role_status", emoji="🔍")
     async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -81,18 +102,6 @@ class RoleToggleView(discord.ui.View):
             await interaction.response.send_message(f"❌ You **DO NOT** have the **{role.name}** role.", ephemeral=True)
 
 # --- 3. THE BOT CLASS ---
-TOKEN = os.environ.get('DISCORD_TOKEN')
-CLIST_USER = os.environ.get('CLIST_USERNAME')
-CLIST_KEY = os.environ.get('CLIST_API_KEY')
-CHANNEL_ID_STR = os.environ.get('CHANNEL_ID', '0')
-
-try:
-    CHANNEL_ID = int(CHANNEL_ID_STR)
-except ValueError:
-    CHANNEL_ID = 0
-
-RESOURCES = "1,2,93" 
-
 class ConfigGroup(app_commands.Group):
     def __init__(self, bot):
         super().__init__(name="config", description="Admin configuration commands")
@@ -100,54 +109,45 @@ class ConfigGroup(app_commands.Group):
 
     async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message("❌ You need Administrator permissions in this server to use config commands!", ephemeral=True)
+            await interaction.response.send_message("❌ You need Manage Server permissions to use config commands!", ephemeral=True)
         else:
             logger.error(f"Config command error: {error}")
             try:
                 if not interaction.response.is_done():
                     await interaction.response.send_message("❌ An error occurred while executing the command.", ephemeral=True)
-            except:
+            except Exception:
                 pass
-
 
     @app_commands.command(name="set_channel", description="Set the channel for contest announcements")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        conn = sqlite3.connect(self.bot.db_file)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO guild_config (guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id", (str(interaction.guild_id), str(channel.id)))
-        conn.commit()
-        conn.close()
+        async with aiosqlite.connect(self.bot.db_file) as db:
+            await db.execute("INSERT INTO guild_config (guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id=excluded.channel_id", (str(interaction.guild_id), str(channel.id)))
+            await db.commit()
         await interaction.response.send_message(f"✅ Alert channel set to {channel.mention}", ephemeral=True)
 
     @app_commands.command(name="set_ping_role", description="Set the role to ping for contests")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def set_ping_role(self, interaction: discord.Interaction, role: discord.Role):
-        conn = sqlite3.connect(self.bot.db_file)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO guild_config (guild_id, role_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET role_id=excluded.role_id", (str(interaction.guild_id), str(role.id)))
-        conn.commit()
-        conn.close()
+        async with aiosqlite.connect(self.bot.db_file) as db:
+            await db.execute("INSERT INTO guild_config (guild_id, role_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET role_id=excluded.role_id", (str(interaction.guild_id), str(role.id)))
+            await db.commit()
         await interaction.response.send_message(f"✅ Ping role set to {role.name}", ephemeral=True)
 
     @app_commands.command(name="inspect", description="Debug: Verify if SQLite DB data persisted")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def inspect(self, interaction: discord.Interaction):
-        conn = sqlite3.connect(self.bot.db_file)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM guild_config")
-        data = cursor.fetchall()
-        conn.close()
+        async with aiosqlite.connect(self.bot.db_file) as db:
+            async with db.execute("SELECT * FROM guild_config WHERE guild_id = ?", (str(interaction.guild_id),)) as cursor:
+                data = await cursor.fetchall()
         await interaction.response.send_message(f"📁 **DB State (guild_config):**\n```json\n{data}\n```", ephemeral=True)
 
     @app_commands.command(name="send_role_menu", description="Send a permanent button menu for users to get the ping role")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def send_role_menu(self, interaction: discord.Interaction):
-        conn = sqlite3.connect(self.bot.db_file)
-        cursor = conn.cursor()
-        cursor.execute("SELECT role_id FROM guild_config WHERE guild_id = ?", (str(interaction.guild_id),))
-        row = cursor.fetchone()
-        conn.close()
+        async with aiosqlite.connect(self.bot.db_file) as db:
+            async with db.execute("SELECT role_id FROM guild_config WHERE guild_id = ?", (str(interaction.guild_id),)) as cursor:
+                row = await cursor.fetchone()
 
         if not row or not row[0]:
             await interaction.response.send_message("Please set a ping role using `/config set_ping_role` first!", ephemeral=True)
@@ -163,12 +163,13 @@ class ConfigGroup(app_commands.Group):
 
 class CronBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.all()
+        intents = discord.Intents.default()
+        intents.members = True
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         
         self.db_file = os.environ.get("DB_PATH", "cronbot.db")
-        self.init_db()
-        self.sent_reminders = self.load_memory()
+        self.sent_reminders = {}
+        self.session = None
         
         # NOTE: Repo must be PUBLIC for these logos to show in Discord
         img_base = "https://raw.githubusercontent.com/sazid-alam/CronBot/main"
@@ -178,56 +179,54 @@ class CronBot(commands.Bot):
             93: {"name": "AtCoder",    "color": 0x222222, "icon": "⬛", "logo": f"{img_base}/ac.png"}
         }
 
-    def init_db(self):
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sent_contests (
-                contest_id TEXT PRIMARY KEY,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        try:
-            cursor.execute("ALTER TABLE sent_contests ADD COLUMN status TEXT")
-        except sqlite3.OperationalError:
-            pass
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS guild_config (
-                guild_id TEXT PRIMARY KEY,
-                channel_id TEXT,
-                role_id TEXT
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_subscriptions (
-                user_id TEXT,
-                resource_id INTEGER,
-                PRIMARY KEY (user_id, resource_id)
-            )
-        ''')
-        conn.commit()
-        conn.close()
+    async def init_db(self):
+        async with aiosqlite.connect(self.db_file) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS sent_contests (
+                    contest_id TEXT PRIMARY KEY,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            try:
+                await db.execute("ALTER TABLE sent_contests ADD COLUMN status TEXT")
+            except Exception:
+                pass
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS guild_config (
+                    guild_id TEXT PRIMARY KEY,
+                    channel_id TEXT,
+                    role_id TEXT
+                )
+            ''')
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_subscriptions (
+                    user_id TEXT,
+                    resource_id INTEGER,
+                    PRIMARY KEY (user_id, resource_id)
+                )
+            ''')
+            await db.commit()
 
-    def load_memory(self):
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        cursor.execute('SELECT contest_id, status FROM sent_contests')
-        rows = cursor.fetchall()
-        conn.close()
+    async def load_memory(self):
+        async with aiosqlite.connect(self.db_file) as db:
+            async with db.execute('SELECT contest_id, status FROM sent_contests') as cursor:
+                rows = await cursor.fetchall()
         return {row[0]: row[1] for row in rows}
 
-    def save_memory(self, contest_id, status="registration_sent"):
+    async def save_memory(self, contest_id, status="registration_sent"):
         try:
-            conn = sqlite3.connect(self.db_file)
-            cursor = conn.cursor()
-            cursor.execute('INSERT OR REPLACE INTO sent_contests (contest_id, status) VALUES (?, ?)', (str(contest_id), status))
-            conn.commit()
-            conn.close()
+            async with aiosqlite.connect(self.db_file) as db:
+                await db.execute('INSERT OR REPLACE INTO sent_contests (contest_id, status) VALUES (?, ?)', (str(contest_id), status))
+                await db.commit()
             self.sent_reminders[str(contest_id)] = status
         except Exception as e:
             logger.error(f"DB Save Error: {e}")
 
     async def setup_hook(self):
+        self.session = aiohttp.ClientSession(headers={"Accept": "application/json"})
+        await self.init_db()
+        self.sent_reminders = await self.load_memory()
+        
         self.add_view(RoleToggleView())
         self.reminder_patrol.start()
         logger.info("Syncing slash commands...")
@@ -245,27 +244,37 @@ class CronBot(commands.Bot):
         await site.start()
         logger.info(f"Health check server listening on port {port}")
 
+    async def close(self):
+        if hasattr(self, 'session') and self.session:
+            await self.session.close()
+        await super().close()
+
     async def on_ready(self):
         logger.info(f"{self.user.name} is online. @everyone pings active.")
 
     async def fetch_contests(self):
         now = (datetime.now(UTC) - timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%S')
-        url = (f"https://clist.by/api/v2/contest/?"
-               f"username={CLIST_USER}&api_key={CLIST_KEY}&"
-               f"resource_id__in={RESOURCES}&start__gte={now}&"
-               f"order_by=start&format=json&limit=50")
+        params = {
+            "username": CLIST_USER,
+            "api_key": CLIST_KEY,
+            "resource_id__in": RESOURCES,
+            "start__gte": now,
+            "order_by": "start",
+            "format": "json",
+            "limit": 50
+        }
+        url = "https://clist.by/api/v2/contest/"
         
-        async with aiohttp.ClientSession(headers={"Accept": "application/json"}) as session:
-            try:
-                async with session.get(url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get('objects', [])
-                    logger.error(f"CLIST API Error: {resp.status}")
-                    return None
-            except Exception as e:
-                logger.error(f"Fetch Error: {e}")
+        try:
+            async with self.session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('objects', [])
+                logger.error(f"CLIST API Error: {resp.status}")
                 return None
+        except Exception as e:
+            logger.error(f"Fetch Error: {e}")
+            return None
 
     def filter_menu(self, contests):
         filtered = []
@@ -307,10 +316,11 @@ class CronBot(commands.Bot):
                 ts = int(datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC).timestamp())
                 brand_info = self.branding.get(c['resource_id'], {"icon": "•"})
                 lines.append(f"{brand_info['icon']} **[{c['event']}]({c['href']})**\n┕ <t:{ts}:f> (<t:{ts}:R>)\n")
-            except: continue
+            except Exception:
+                continue
         
         embed.description = "\n".join(lines)
-        embed.set_footer(text="DU_Rumbling • Auto-localized")
+        embed.set_footer(text="CronBot • Auto-localized")
         return embed
 
     @tasks.loop(minutes=1)
@@ -326,13 +336,11 @@ class CronBot(commands.Bot):
         now = datetime.now(UTC)
         
         # Pull Configs & Subs
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        cursor.execute("SELECT guild_id, channel_id, role_id FROM guild_config")
-        guild_configs = cursor.fetchall()
-        cursor.execute("SELECT user_id, resource_id FROM user_subscriptions")
-        subscriptions = cursor.fetchall()
-        conn.close()
+        async with aiosqlite.connect(self.db_file) as db:
+            async with db.execute("SELECT guild_id, channel_id, role_id FROM guild_config") as cursor:
+                guild_configs = await cursor.fetchall()
+            async with db.execute("SELECT user_id, resource_id FROM user_subscriptions") as cursor:
+                subscriptions = await cursor.fetchall()
         
         subs_by_resource = {}
         for uid, rid in subscriptions:
@@ -342,12 +350,10 @@ class CronBot(commands.Bot):
         active_ids = {str(c['id']) for c in all_objects}
         to_remove = [rid for rid in self.sent_reminders.keys() if rid not in active_ids]
         if to_remove:
-            conn = sqlite3.connect(self.db_file)
-            cursor = conn.cursor()
-            cursor.executemany('DELETE FROM sent_contests WHERE contest_id = ?', [(r,) for r in to_remove])
-            conn.commit()
-            conn.close()
-            self.sent_reminders = {rid: status for rid, status in self.sent_reminders.items() if rid in active_ids}
+            async with aiosqlite.connect(self.db_file) as db:
+                await db.executemany('DELETE FROM sent_contests WHERE contest_id = ?', [(r,) for r in to_remove])
+                await db.commit()
+            self.sent_reminders = {rid: status for rid, status in self.sent_reminders.items() if str(rid) in active_ids}
         
         # 2. Check for Reminders (Multi-Stage)
         for c in filtered_contests:
@@ -368,17 +374,26 @@ class CronBot(commands.Bot):
                     channel = self.get_channel(int(ch_id))
                     if channel:
                         ping_text = f"<@&{r_id}>" if r_id else "@everyone"
-                        try: await channel.send(content=f"{ping_text} 🔔 **Registration open!** Starts in roughly 30m.", embed=embed, view=view)
-                        except: pass
+                        try: 
+                            await channel.send(content=f"{ping_text} 🔔 **Registration open!** Starts in roughly 30m.", embed=embed, view=view)
+                        except discord.Forbidden:
+                            logger.warning(f"Missing permissions to send in channel {ch_id}")
+                        except Exception as e:
+                            logger.warning(f"Error sending guild msg to {ch_id}: {e}")
                 
                 # Send to DM subscribers
                 for uid in subs_by_resource.get(c_res, []):
                     try:
                         user = self.get_user(int(uid)) or await self.fetch_user(int(uid))
-                        if user: await user.send(content="🔔 **Registration open!** Starts in roughly 30m.", embed=embed, view=view)
-                    except: pass
+                        if user: 
+                            await user.send(content="🔔 **Registration open!** Starts in roughly 30m.", embed=embed, view=view)
+                    except discord.Forbidden:
+                        logger.warning(f"Cannot DM user {uid} (DMs closed)")
+                    except Exception as e:
+                        logger.warning(f"Error sending DM to {uid}: {e}")
+                    await asyncio.sleep(0.05)  # Rate limiting protection
                         
-                self.save_memory(c_id, "registration_sent")
+                await self.save_memory(c_id, "registration_sent")
                 
             # Tier 2: 5 Min Get Seated Alert (Fallback window: 0 to 8 mins)
             elif 0 < diff <= 8 and status in (None, "registration_sent"):
@@ -390,17 +405,26 @@ class CronBot(commands.Bot):
                     channel = self.get_channel(int(ch_id))
                     if channel:
                         ping_text = f"<@&{r_id}>" if r_id else "@everyone"
-                        try: await channel.send(content=f"{ping_text} ⚠️ **Starting soon!** Get your templates ready.", embed=embed)
-                        except: pass
+                        try: 
+                            await channel.send(content=f"{ping_text} ⚠️ **Starting soon!** Get your templates ready.", embed=embed)
+                        except discord.Forbidden:
+                            logger.warning(f"Missing permissions to send in channel {ch_id}")
+                        except Exception as e:
+                            logger.warning(f"Error sending guild msg to {ch_id}: {e}")
                 
                 # Send to DM subscribers
                 for uid in subs_by_resource.get(c_res, []):
                     try:
                         user = self.get_user(int(uid)) or await self.fetch_user(int(uid))
-                        if user: await user.send(content="⚠️ **Starting soon!** Get your templates ready.", embed=embed)
-                    except: pass
+                        if user: 
+                            await user.send(content="⚠️ **Starting soon!** Get your templates ready.", embed=embed)
+                    except discord.Forbidden:
+                        logger.warning(f"Cannot DM user {uid} (DMs closed)")
+                    except Exception as e:
+                        logger.warning(f"Error sending DM to {uid}: {e}")
+                    await asyncio.sleep(0.05)  # Rate limiting protection
                         
-                self.save_memory(c_id, "starting_soon_sent")
+                await self.save_memory(c_id, "starting_soon_sent")
 
 bot = CronBot()
 
@@ -412,6 +436,9 @@ async def ping_slash(interaction: discord.Interaction):
 async def contests_slash(interaction: discord.Interaction):
     await interaction.response.defer()
     data = await bot.fetch_contests()
+    if data is None:
+        await interaction.followup.send("❌ Failed to fetch contests from the API. Please try again later.")
+        return
     embed = bot.create_embed(data)
     await interaction.followup.send(embed=embed)
 
@@ -420,13 +447,15 @@ async def contests_slash(interaction: discord.Interaction):
 async def test_reminder(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     data = await bot.fetch_contests()
+    if data is None:
+        await interaction.followup.send("❌ Failed to fetch contests from the API.")
+        return
+    
     filtered = bot.filter_menu(data)
     if filtered:
-        conn = sqlite3.connect(bot.db_file)
-        cursor = conn.cursor()
-        cursor.execute("SELECT role_id FROM guild_config WHERE guild_id = ?", (str(interaction.guild_id),))
-        row = cursor.fetchone()
-        conn.close()
+        async with aiosqlite.connect(bot.db_file) as db:
+            async with db.execute("SELECT role_id FROM guild_config WHERE guild_id = ?", (str(interaction.guild_id),)) as cursor:
+                row = await cursor.fetchone()
         
         ping_text = f"<@&{row[0]}>" if row and row[0] else "@everyone"
         embed = bot.create_embed([filtered[0]], is_reminder=True)
@@ -442,11 +471,9 @@ async def test_reminder(interaction: discord.Interaction):
     app_commands.Choice(name="AtCoder", value=93)
 ])
 async def subscribe_slash(interaction: discord.Interaction, platform: app_commands.Choice[int]):
-    conn = sqlite3.connect(bot.db_file)
-    cursor = conn.cursor()
-    cursor.execute('INSERT OR IGNORE INTO user_subscriptions (user_id, resource_id) VALUES (?, ?)', (str(interaction.user.id), platform.value))
-    conn.commit()
-    conn.close()
+    async with aiosqlite.connect(bot.db_file) as db:
+        await db.execute('INSERT OR IGNORE INTO user_subscriptions (user_id, resource_id) VALUES (?, ?)', (str(interaction.user.id), platform.value))
+        await db.commit()
     await interaction.response.send_message(f"✅ Subscribed to {platform.name} DMs!", ephemeral=True)
 
 @bot.tree.command(name="unsubscribe", description="Unsubscribe from contest DMs")
@@ -456,13 +483,10 @@ async def subscribe_slash(interaction: discord.Interaction, platform: app_comman
     app_commands.Choice(name="AtCoder", value=93)
 ])
 async def unsubscribe_slash(interaction: discord.Interaction, platform: app_commands.Choice[int]):
-    conn = sqlite3.connect(bot.db_file)
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM user_subscriptions WHERE user_id=? AND resource_id=?', (str(interaction.user.id), platform.value))
-    conn.commit()
-    conn.close()
+    async with aiosqlite.connect(bot.db_file) as db:
+        await db.execute('DELETE FROM user_subscriptions WHERE user_id=? AND resource_id=?', (str(interaction.user.id), platform.value))
+        await db.commit()
     await interaction.response.send_message(f"✅ Unsubscribed from {platform.name} DMs.", ephemeral=True)
 
 if __name__ == "__main__":
-    if TOKEN:
-        bot.run(TOKEN)
+    bot.run(TOKEN)
