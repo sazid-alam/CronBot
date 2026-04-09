@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>🕒 CronBot (Sous-Chef)</h1>
+  <h1>CronBot</h1>
   <p>A highly resilient, multi-platform Competitive Programming Discord Bot built for active clubs and servers.</p>
 </div>
 
