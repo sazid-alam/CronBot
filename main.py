@@ -25,8 +25,7 @@ class RoleToggleView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         
-    @discord.ui.button(label="Get/Remove Ping Role", style=discord.ButtonStyle.primary, custom_id="persistent_role_toggle", emoji="🔔")
-    async def toggle_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def fetch_ping_role(self, interaction: discord.Interaction):
         conn = sqlite3.connect(interaction.client.db_file)
         cursor = conn.cursor()
         cursor.execute("SELECT role_id FROM guild_config WHERE guild_id = ?", (str(interaction.guild_id),))
@@ -35,22 +34,51 @@ class RoleToggleView(discord.ui.View):
         
         if not row or not row[0]:
             await interaction.response.send_message("The server admin hasn't configured a ping role yet.", ephemeral=True)
-            return
+            return None
             
         role = interaction.guild.get_role(int(row[0]))
         if not role:
             await interaction.response.send_message("The configured ping role no longer exists.", ephemeral=True)
-            return
+            return None
+        return role
 
-        try:
-            if role in interaction.user.roles:
-                await interaction.user.remove_roles(role)
-                await interaction.response.send_message(f"Removed the **{role.name}** role.", ephemeral=True)
-            else:
+    @discord.ui.button(label="Get Role", style=discord.ButtonStyle.success, custom_id="persistent_role_get", emoji="✅")
+    async def get_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = await self.fetch_ping_role(interaction)
+        if not role: return
+        
+        if role in interaction.user.roles:
+            await interaction.response.send_message(f"You already have the **{role.name}** role!", ephemeral=True)
+        else:
+            try:
                 await interaction.user.add_roles(role)
-                await interaction.response.send_message(f"Given the **{role.name}** role! You will now be mentioned for contests.", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message("I don't have permission to manage this role. Make sure the bot's role is higher than the ping role in settings.", ephemeral=True)
+                await interaction.response.send_message(f"✅ Given the **{role.name}** role! You will now be mentioned for contests.", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.response.send_message("I don't have permission to manage this role. Make sure the bot's role is higher than the ping role in settings.", ephemeral=True)
+
+    @discord.ui.button(label="Remove Role", style=discord.ButtonStyle.danger, custom_id="persistent_role_remove", emoji="❌")
+    async def remove_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = await self.fetch_ping_role(interaction)
+        if not role: return
+        
+        if role not in interaction.user.roles:
+            await interaction.response.send_message(f"You don't have the **{role.name}** role to begin with!", ephemeral=True)
+        else:
+            try:
+                await interaction.user.remove_roles(role)
+                await interaction.response.send_message(f"❌ Removed the **{role.name}** role.", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.response.send_message("I don't have permission to manage this role. Make sure the bot's role is higher than the ping role in settings.", ephemeral=True)
+
+    @discord.ui.button(label="Check Status", style=discord.ButtonStyle.secondary, custom_id="persistent_role_status", emoji="🔍")
+    async def check_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = await self.fetch_ping_role(interaction)
+        if not role: return
+        
+        if role in interaction.user.roles:
+            await interaction.response.send_message(f"✅ You **currently have** the **{role.name}** role and will receive notifications.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ You **DO NOT** have the **{role.name}** role.", ephemeral=True)
 
 # --- 3. THE BOT CLASS ---
 TOKEN = os.environ.get('DISCORD_TOKEN')
@@ -100,7 +128,7 @@ class ConfigGroup(app_commands.Group):
         conn.close()
         await interaction.response.send_message(f"📁 **DB State (guild_config):**\n```json\n{data}\n```", ephemeral=True)
 
-    @app_commands.command(name="send_role_menu", description="Send a permanent button for users to get the ping role")
+    @app_commands.command(name="send_role_menu", description="Send a permanent button menu for users to get the ping role")
     @app_commands.checks.has_permissions(administrator=True)
     async def send_role_menu(self, interaction: discord.Interaction):
         conn = sqlite3.connect(self.bot.db_file)
@@ -115,7 +143,7 @@ class ConfigGroup(app_commands.Group):
 
         embed = discord.Embed(
             title="🔔 Contest Notifications",
-            description="Click the button below to toggle the ping role and get mentioned when contests start!",
+            description="Use the buttons below to manage your contest notifications!\n\n✅ **Get Role** to be notified\n❌ **Remove Role** to stop being notified\n🔍 **Check Status** to verify if you have the role",
             color=0x318ce7
         )
         await interaction.channel.send(embed=embed, view=RoleToggleView())
