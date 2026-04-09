@@ -416,14 +416,22 @@ async def contests_slash(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="test_reminder", description="Preview reminder visuals")
+@app_commands.checks.has_permissions(manage_guild=True)
 async def test_reminder(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     data = await bot.fetch_contests()
     filtered = bot.filter_menu(data)
     if filtered:
+        conn = sqlite3.connect(bot.db_file)
+        cursor = conn.cursor()
+        cursor.execute("SELECT role_id FROM guild_config WHERE guild_id = ?", (str(interaction.guild_id),))
+        row = cursor.fetchone()
+        conn.close()
+        
+        ping_text = f"<@&{row[0]}>" if row and row[0] else "@everyone"
         embed = bot.create_embed([filtered[0]], is_reminder=True)
         view = RegisterView(filtered[0]['href'])
-        await interaction.followup.send(content="@everyone 🧪 **Test Preview:**", embed=embed, view=view)
+        await interaction.followup.send(content=f"{ping_text} 🧪 **Test Preview:**", embed=embed, view=view)
     else:
         await interaction.followup.send("No contests found to test.")
 
