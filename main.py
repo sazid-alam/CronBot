@@ -98,6 +98,18 @@ class ConfigGroup(app_commands.Group):
         super().__init__(name="config", description="Admin configuration commands")
         self.bot = bot
 
+    async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingPermissions):
+            await interaction.response.send_message("❌ You need Administrator permissions in this server to use config commands!", ephemeral=True)
+        else:
+            logger.error(f"Config command error: {error}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ An error occurred while executing the command.", ephemeral=True)
+            except:
+                pass
+
+
     @app_commands.command(name="set_channel", description="Set the channel for contest announcements")
     @app_commands.checks.has_permissions(administrator=True)
     async def set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
