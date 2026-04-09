@@ -21,6 +21,37 @@ class RegisterView(discord.ui.View):
         super().__init__()
         self.add_item(discord.ui.Button(label="Register on Platform", url=url, style=discord.ButtonStyle.link))
 
+class RoleToggleView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        
+    @discord.ui.button(label="Get/Remove Ping Role", style=discord.ButtonStyle.primary, custom_id="persistent_role_toggle", emoji="🔔")
+    async def toggle_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        conn = sqlite3.connect(interaction.client.db_file)
+        cursor = conn.cursor()
+        cursor.execute("SELECT role_id FROM guild_config WHERE guild_id = ?", (str(interaction.guild_id),))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if not row or not row[0]:
+            await interaction.response.send_message("The server admin hasn't configured a ping role yet.", ephemeral=True)
+            return
+            
+        role = interaction.guild.get_role(int(row[0]))
+        if not role:
+            await interaction.response.send_message("The configured ping role no longer exists.", ephemeral=True)
+            return
+
+        try:
+            if role in interaction.user.roles:
+                await interaction.user.remove_roles(role)
+                await interaction.response.send_message(f"Removed the **{role.name}** role.", ephemeral=True)
+            else:
+                await interaction.user.add_roles(role)
+                await interaction.response.send_message(f"Given the **{role.name}** role! You will now be mentioned for contests.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("I don't have permission to manage this role. Make sure the bot's role is higher than the ping role in settings.", ephemeral=True)
+
 # --- 3. THE BOT CLASS ---
 TOKEN = os.environ.get('DISCORD_TOKEN')
 CLIST_USER = os.environ.get('CLIST_USERNAME')
@@ -68,6 +99,27 @@ class ConfigGroup(app_commands.Group):
         data = cursor.fetchall()
         conn.close()
         await interaction.response.send_message(f"📁 **DB State (guild_config):**\n```json\n{data}\n```", ephemeral=True)
+
+    @app_commands.command(name="send_role_menu", description="Send a permanent button for users to get the ping role")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def send_role_menu(self, interaction: discord.Interaction):
+        conn = sqlite3.connect(self.bot.db_file)
+        cursor = conn.cursor()
+        cursor.execute("SELECT role_id FROM guild_config WHERE guild_id = ?", (str(interaction.guild_id),))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row or not row[0]:
+            await interaction.response.send_message("Please set a ping role using `/config set_ping_role` first!", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🔔 Contest Notifications",
+            description="Click the button below to toggle the ping role and get mentioned when contests start!",
+            color=0x318ce7
+        )
+        await interaction.channel.send(embed=embed, view=RoleToggleView())
+        await interaction.response.send_message("✅ Role menu sent!", ephemeral=True)
 
 class CronBot(commands.Bot):
     def __init__(self):
@@ -136,6 +188,7 @@ class CronBot(commands.Bot):
             logger.error(f"DB Save Error: {e}")
 
     async def setup_hook(self):
+        self.add_view(RoleToggleView())
         self.reminder_patrol.start()
         logger.info("Syncing slash commands...")
         self.tree.add_command(ConfigGroup(self))
