@@ -111,7 +111,7 @@ class ConfigGroup(app_commands.Group):
 
 
     @app_commands.command(name="set_channel", description="Set the channel for contest announcements")
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         conn = sqlite3.connect(self.bot.db_file)
         cursor = conn.cursor()
@@ -121,7 +121,7 @@ class ConfigGroup(app_commands.Group):
         await interaction.response.send_message(f"✅ Alert channel set to {channel.mention}", ephemeral=True)
 
     @app_commands.command(name="set_ping_role", description="Set the role to ping for contests")
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def set_ping_role(self, interaction: discord.Interaction, role: discord.Role):
         conn = sqlite3.connect(self.bot.db_file)
         cursor = conn.cursor()
@@ -131,7 +131,7 @@ class ConfigGroup(app_commands.Group):
         await interaction.response.send_message(f"✅ Ping role set to {role.name}", ephemeral=True)
 
     @app_commands.command(name="inspect", description="Debug: Verify if SQLite DB data persisted")
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def inspect(self, interaction: discord.Interaction):
         conn = sqlite3.connect(self.bot.db_file)
         cursor = conn.cursor()
@@ -141,7 +141,7 @@ class ConfigGroup(app_commands.Group):
         await interaction.response.send_message(f"📁 **DB State (guild_config):**\n```json\n{data}\n```", ephemeral=True)
 
     @app_commands.command(name="send_role_menu", description="Send a permanent button menu for users to get the ping role")
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def send_role_menu(self, interaction: discord.Interaction):
         conn = sqlite3.connect(self.bot.db_file)
         cursor = conn.cursor()
