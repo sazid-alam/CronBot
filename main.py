@@ -7,7 +7,7 @@ import aiohttp
 import asyncio
 from discord import app_commands
 from discord.ext import tasks, commands
-from datetime import datetime, UTC, timedelta
+from datetime import datetime, UTC, timedelta, time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -229,6 +229,7 @@ class CronBot(commands.Bot):
         
         self.add_view(RoleToggleView())
         self.reminder_patrol.start()
+        self.daily_announcement.start()
         logger.info("Syncing slash commands...")
         self.tree.add_command(ConfigGroup(self))
         await self.tree.sync()
@@ -395,36 +396,63 @@ class CronBot(commands.Bot):
                         
                 await self.save_memory(c_id, "registration_sent")
                 
-            # Tier 2: 5 Min Get Seated Alert (Fallback window: 0 to 8 mins)
-            elif 0 < diff <= 8 and status in (None, "registration_sent"):
-                embed = self.create_embed([c], is_reminder=True)
+    @tasks.loop(time=time(hour=2, minute=0, tzinfo=UTC))
+    async def daily_announcement(self):
+        await self.wait_until_ready()
+        all_objects = await self.fetch_contests()
+        if not all_objects:
+            return
+
+        filtered_contests = self.filter_menu(all_objects)
+        now = datetime.now(UTC)
+        
+        todays_contests = []
+        for c in filtered_contests:
+            start_dt = datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC)
+            # Include contests in the next 24 hours
+            if now <= start_dt <= now + timedelta(days=1):
+                todays_contests.append(c)
                 
-                # Send to guilds
-                for g_id, ch_id, r_id in guild_configs:
-                    if not ch_id: continue
-                    channel = self.get_channel(int(ch_id))
-                    if channel:
-                        ping_text = f"<@&{r_id}>" if r_id else "@everyone"
-                        try: 
-                            await channel.send(content=f"{ping_text} ⚠️ **Starting soon!** Get your templates ready.", embed=embed)
-                        except discord.Forbidden:
-                            logger.warning(f"Missing permissions to send in channel {ch_id}")
-                        except Exception as e:
-                            logger.warning(f"Error sending guild msg to {ch_id}: {e}")
+        if not todays_contests:
+            return
+            
+        embed = discord.Embed(
+            title="📅 Welcome to Today's CP Calendar!",
+            description="Good morning! Here are the contests happening in the next 24 hours.",
+            color=0x2b2d31
+        )
+        lines = []
+        for c in todays_contests:
+            try:
+                ts = int(datetime.fromisoformat(c['start'].replace('Z', '')).replace(tzinfo=UTC).timestamp())
+                brand_info = self.branding.get(c['resource_id'], {"icon": "•"})
+                lines.append(f"{brand_info['icon']} **[{c['event']}]({c['href']})**\n┕ <t:{ts}:t> (<t:{ts}:R>)\n")
+            except Exception:
+                continue
                 
-                # Send to DM subscribers
-                for uid in subs_by_resource.get(c_res, []):
-                    try:
-                        user = self.get_user(int(uid)) or await self.fetch_user(int(uid))
-                        if user: 
-                            await user.send(content="⚠️ **Starting soon!** Get your templates ready.", embed=embed)
-                    except discord.Forbidden:
-                        logger.warning(f"Cannot DM user {uid} (DMs closed)")
-                    except Exception as e:
-                        logger.warning(f"Error sending DM to {uid}: {e}")
-                    await asyncio.sleep(0.05)  # Rate limiting protection
-                        
-                await self.save_memory(c_id, "starting_soon_sent")
+        if lines:
+            embed.description += "\n\n" + "\n".join(lines)
+        else:
+            return
+
+        embed.set_footer(text="CronBot • Daily Digest")
+
+        async with aiosqlite.connect(self.db_file) as db:
+            async with db.execute("SELECT guild_id, channel_id, role_id FROM guild_config") as cursor:
+                guild_configs = await cursor.fetchall()
+                
+        # Send strictly to channels for the daily digest
+        for g_id, ch_id, r_id in guild_configs:
+            if not ch_id: continue
+            channel = self.get_channel(int(ch_id))
+            if channel:
+                ping_text = f"<@&{r_id}>" if r_id else "@everyone"
+                try:
+                    await channel.send(content=f"🌅 {ping_text} **Daily Digest!**", embed=embed)
+                except discord.Forbidden:
+                    logger.warning(f"Missing permissions for daily digest in channel {ch_id}")
+                except Exception as e:
+                    logger.warning(f"Daily digest failed to send to {ch_id}: {e}")
 
 bot = CronBot()
 
